@@ -1,0 +1,349 @@
+using Emgu.CV;
+using Emgu.CV.CvEnum;
+using Emgu.CV.Structure;
+using Emgu.CV.Util;
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO.Ports;
+using System.Linq;
+using System.Threading;
+using System.Windows.Forms;
+
+
+namespace UR2_Final_Crist
+{
+    public partial class Form1 : Form
+    {
+        VideoCapture capture;
+
+        Thread captureThread;
+        Thread serialMonitoringThread;
+
+        private Point paperCenter = new Point();
+        private Point basePoint = new Point();
+
+        private Mat frame = new Mat();
+        private Mat grayImage = new Mat();
+        private Mat blurredImage = new Mat();
+        private Mat decoratedImage = new Mat();
+        private Mat binaryImage = new Mat();
+        private Mat screenshot = new Mat();
+        private Mat binaryImageClone = new Mat();
+
+        SerialPort arduinoSerial = new SerialPort();
+
+        List<Shape> shapeList = new List<Shape>();
+
+        private int ksize = 9;
+        private int minThresh = 80;
+        private int maxThresh = 255;
+        private int sqArea = 1000;
+        private int triArea = 400;
+        private int paperArea = 22400;
+
+        private double pxToIn = 0;
+
+        private bool enableCoordinateSending = false;
+
+        private string toSend;
+        private string triORsq = "";
+
+        public Form1()
+        {
+            InitializeComponent();
+        }
+        private void Form1_Load(object sender, EventArgs e)
+        {
+            capture = new VideoCapture(0);
+            captureThread = new Thread(Main);
+            captureThread.Start();
+            try
+            {
+                arduinoSerial.PortName = "COM8";
+                arduinoSerial.BaudRate = 9600;
+                arduinoSerial.Open();
+
+                serialMonitoringThread = new Thread(MonitorSerialData);
+                serialMonitoringThread.Start();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "Error Initializing COM port");
+                Close();
+            }
+            
+        }
+        private void Main()
+        {
+            while (capture.IsOpened)
+            {
+                ConfigureWebcam();
+                try
+                {
+                    rawPictureBox.Image = frame.ToBitmap();
+                    blurPictureBox.Image = grayImage.ToBitmap();
+                    binaryPictureBox.Image = binaryImage.ToBitmap();
+                }
+                catch {  }
+                if(enableCoordinateSending)
+                {
+                    List<Shape> triangleList = new List<Shape>();
+                    List<Shape> squareList = new List<Shape>();
+
+                    screenshot = binaryImageClone;
+                    DetectShapes();
+                    SquareVSTriangle(triangleList, squareList);
+                    ShapeFormatandSend(triangleList, squareList);
+                }
+                frame.Dispose();y
+                binaryImageClone.Dispose();
+            }
+        }
+        private void ConfigureWebcam()
+        {
+            frame = capture.QueryFrame();
+            int newHeight = (frame.Size.Height * rawPictureBox.Size.Width) / frame.Size.Width;
+            Size newSize = new Size(rawPictureBox.Size.Width, newHeight);
+            CvInvoke.Resize(frame, frame, newSize);
+            CvInvoke.GaussianBlur(frame, blurredImage, new Size(ksize, ksize), 0);
+            CvInvoke.CvtColor(blurredImage, grayImage, typeof(Bgr), typeof(Gray));
+            CvInvoke.Threshold(grayImage, binaryImage, minThresh, maxThresh, Emgu.CV.CvEnum.ThresholdType.Binary);
+            CvInvoke.CvtColor(binaryImage, decoratedImage, typeof(Gray), typeof(Bgr));
+            binaryImageClone = binaryImage.Clone();
+        }
+        private void DetectShapes()
+        {
+            using (VectorOfVectorOfPoint shapes = new VectorOfVectorOfPoint())
+            {
+                CvInvoke.FindContours(screenshot, shapes, null, RetrType.List, ChainApproxMethod.ChainApproxSimple);
+                Invoke(new Action(() => { shapeCountLabel.Text = $"{shapes.Size}"; }));
+
+                for (int i = 0; i < shapes.Size; i++)
+                {
+                    VectorOfPoint shape = shapes[i];
+                    double area = CvInvoke.ContourArea(shape);
+                    Rectangle boundingBox = CvInvoke.BoundingRectangle(shape);
+                    Point center = new Point(boundingBox.X + boundingBox.Width / 2, boundingBox.Y + boundingBox.Height / 2);
+                    if (area > (paperArea - 3000) && area < (paperArea + 3000))
+                    {
+                        triORsq = "Unidentified";
+                        pxToIn = boundingBox.Width / 11.0;
+                        basePoint = new Point(center.X, center.Y + Convert.ToInt32(9 * pxToIn));
+                        paperCenter = new Point(center.X, center.Y);
+                    }
+                    else if (area > (triArea - 200) && area < (triArea + 200))
+                    {
+                        triORsq = "Triangle";
+                        CvInvoke.Polylines(decoratedImage, shape, true, new Bgr(Color.Green).MCvScalar, 1);
+                        CvInvoke.Circle(decoratedImage, center, 0, new Bgr(Color.Purple).MCvScalar, 3);
+                    }
+                    else if (area > (sqArea - 200) && area < (sqArea + 200))
+                    {
+                        triORsq = "Square";
+                        CvInvoke.Polylines(decoratedImage, shape, true, new Bgr(Color.Red).MCvScalar, 1);
+                        CvInvoke.Circle(decoratedImage, center, 0, new Bgr(Color.Purple).MCvScalar, 3);
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                    shapeList.Add(new Shape() { Label = i + 1, Area = area, TriSq = triORsq, Center = center });
+                }
+                foreach (Shape aShape in shapeList.ToList())
+                {
+                    Invoke(new Action(() => { shapeInfoLabel.Text += $"{aShape}\n\n"; }));
+                }
+                try
+                {
+                    processedPictureBox.Image = decoratedImage.ToBitmap();
+                }
+                catch { }
+            }
+            
+        }
+        private void ShapeFormatandSend(List<Shape> triangleList, List<Shape> squareList)
+        { 
+            foreach (Shape sq in squareList)
+            {
+                if (enableCoordinateSending && sq != null)
+                {
+                    double sqX = sq.Center.X - basePoint.X;
+                    double sqY = basePoint.Y - sq.Center.Y;
+                    double sqXin = Math.Round(Convert.ToDouble(sqX) / pxToIn, 2);
+                    double sqYin = Math.Round(Convert.ToDouble(sqY) / pxToIn, 2);
+                    toSend = "<" + sq.TriSq.ToString() + ", " + sqXin.ToString() + ", " + sqYin.ToString() + ">";
+                    SendtoArduino(toSend);
+                    Invoke(new Action(() => { sentDataLogLabel.Text += $"{toSend}\n"; }));
+                    enableCoordinateSending = false;
+                }
+                else
+                {
+                    continue;
+                }
+            }
+            foreach (Shape tri in triangleList)
+            {
+                if (enableCoordinateSending && tri != null)
+                {
+                    double triX = tri.Center.X - basePoint.X;
+                    double triY = basePoint.Y - tri.Center.Y;
+                    double triXin = Math.Round(Convert.ToDouble(triX) / pxToIn, 2);
+                    double triYin = Math.Round(Convert.ToDouble(triY) / pxToIn, 2);
+                    toSend = "<" + tri.TriSq.ToString() + ", " + triXin.ToString() + ", " + triYin.ToString() + ">";
+                    SendtoArduino(toSend);
+                    Invoke(new Action(() => { sentDataLogLabel.Text += $"{toSend}\n"; }));
+                    enableCoordinateSending = false;
+                }
+                else
+                {
+                    continue;
+                }
+            }
+        }
+        private void SquareVSTriangle(List<Shape> triangleList, List<Shape> squareList)
+        {
+            triangleList.Clear();
+            triangleList.AddRange(shapeList.ToList());
+            while (triangleList.Contains(new Shape { TriSq = "Square" }) || triangleList.Contains(new Shape { TriSq = "Unidentified" }))
+            {
+                triangleList.Remove(new Shape { TriSq = "Square" });
+                triangleList.Remove(new Shape { TriSq = "Unidentified" });
+            }
+            squareList.Clear();
+            squareList.AddRange(shapeList.ToList());
+            while (squareList.Contains(new Shape { TriSq = "Triangle" }) || squareList.Contains(new Shape { TriSq = "Unidentified" }))
+            {
+                squareList.Remove(new Shape { TriSq = "Triangle" });
+                squareList.Remove(new Shape { TriSq = "Unidentified" });
+            }
+            foreach (Shape sq in squareList)
+            {
+                Invoke(new Action(() => { sqListLabel.Text += $"{sq}\n"; }));
+            }
+            foreach (Shape tri in triangleList)
+            {
+                Invoke(new Action(() => { triListLabel.Text += $"{tri}\n"; }));
+            }
+            shapeList.Clear();
+        }
+        private void SendtoArduino(string coords)
+        {
+            try
+            {
+                arduinoSerial.WriteLine(coords);
+                Console.WriteLine(coords);
+            }
+            catch { }
+        }
+        private void MonitorSerialData()
+        {
+            while (true)
+            {
+                string msg = arduinoSerial.ReadLine();
+                if(msg != null)
+                {
+                    if (msg.IndexOf("<") == -1 || msg.IndexOf(">") == -1)
+                    {
+                        continue;
+                    }
+                    msg = msg.Substring(msg.IndexOf("<") + 1);
+                    msg = msg.Remove(msg.IndexOf(">"));
+                    if (msg.Length == 0)
+                    {
+                        continue;
+                    }
+                    if (msg.Substring(0, 1) == "S")
+                    {
+                        ToggleFieldAvailability(msg.Substring(1, 1) == "1");
+                    }
+                    else if (msg.Substring(0, 1) == "P")
+                    {
+                        Invoke(new Action(() => { receivedDataLogLabel.Text += $"{msg.Substring(1)}\n"; }));
+                    }
+                }
+            }
+        }
+        private void ToggleFieldAvailability(bool suspend)
+        {
+            Invoke(new Action(() => 
+            {
+                enableCoordinateSending = !suspend;
+                lockStatusStripLabel.Text = $" State: {(suspend ? "Locked" : "Unlocked")}";
+            }));
+        }
+
+        private void kernelSizeTrackBar_Scroll(object sender, EventArgs e)
+        {
+            ksize = kernelSizeTrackBar.Value;
+            if (ksize % 2 == 0)
+            {
+                ksize--;
+                kernelSizeTrackBar.Value = ksize;
+            }
+            kernelSizeLabel.Text = "" + ksize;
+        }
+        private void minThreshTrackBar_Scroll(object sender, EventArgs e)
+        {
+            minThresh = minThreshTrackBar.Value;
+            minThreshLabel.Text = "" + minThresh;
+        }
+        private void maxThreshTrackBar_Scroll(object sender, EventArgs e)
+        {
+            maxThresh = maxThreshTrackBar.Value;
+            maxThreshLabel.Text = "" + maxThresh;
+        }
+        private void setAreaButton_Click(object sender, EventArgs e)
+        {
+            sqArea = Convert.ToInt32(sqAreaTextBox.Text);
+            triArea = Convert.ToInt32(triAreaTextBox.Text);
+        }
+        private void sendCoordsDebugButton_Click(object sender, EventArgs e)
+        {
+            if (enableCoordinateSending)
+            {
+                toSend = "<" + shapeDebugTextBox.Text + ", " + xcoordsDebugTextBox.Text + ", " + ycoordsDebugTextBox.Text + ">";
+                SendtoArduino(toSend);
+                Invoke(new Action(() => { sentDataLogLabel.Text += $"{toSend}\n"; }));
+                return;
+            }
+            
+        }
+        private void Form1_FormClosed(object sender, FormClosedEventArgs e)
+        {
+            captureThread.Abort();
+            serialMonitoringThread.Abort();
+        }
+        private void startControlButton_Click(object sender, EventArgs e)
+        {
+            enableCoordinateSending = true;
+        }
+    }
+    public class Shape : IEquatable<Shape>
+    {
+        public int Label { get; set; }
+        public double Area { get; set; }
+        public string TriSq { get; set; }
+        public Point Center { get; set; }
+        public override string ToString()
+        {
+            return "Label: " + Label + ", Area: " + Area + ", Shape: " + TriSq + ", Center: " + Center;
+        }
+        public override bool Equals(Object obj)
+        {
+            if (obj == null) return false;
+            Shape objAsShape = obj as Shape;
+            if (objAsShape == null) return false;
+            else return Equals(objAsShape);
+        }
+        public override int GetHashCode()
+        {
+            return Label;
+        }
+        public bool Equals(Shape other)
+        {
+            if (other == null) return false;
+            return (this.TriSq.Equals(other.TriSq));
+        }
+    }
+}

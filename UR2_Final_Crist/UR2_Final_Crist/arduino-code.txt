@@ -1,0 +1,190 @@
+#include <AccelStepper.h>
+#include <MultiStepper.h>
+
+#define in1 5
+#define in2 4
+#define in3 3
+#define in4 2
+#define led 13
+
+#define interface 8
+
+AccelStepper baseRotate = AccelStepper(interface, in1, in3, in3, in4);
+
+const byte numChars = 32;
+char receivedShape[numChars];
+char tempShapeStorage[numChars];
+
+char shape[numChars] = {0};
+float xDist = 0;
+float yDist = 0;
+double baseAngle = 0;
+double shapeDist = 0;
+double pi = 3.14159265358;
+
+double L1 = 5.7015748;
+double L2 = 8.93701;
+double L3 = 8.6062992;
+double th1 = 0;
+double th2 = 0;
+double degtoTouch = 0;
+double fullStretch = 0;
+double x = 0;
+double y = 0;
+
+bool newShape = false;
+
+void setup(){
+  Serial.begin(9600);
+  pinMode(led, OUTPUT);
+}
+void loop(){
+  receiveShapeData();
+  if (newShape) {
+    sendSuspendCmd();
+    digitalWrite(led, HIGH);
+    parseData();
+    doMath();
+    sendData();
+    /*if(fullStretch <= 17.5){
+      moveRobot();
+      enableMagnet();
+      if(shape == "Triangle"){
+        trianglePosition();
+        moveRobot();
+        resetPosition();
+        moveRobot();
+      }
+      else if(shape == "Square"){
+        squarePosition();
+        moveRobot();
+        resetPosistion();
+        moveRobot();
+      }
+    }
+    else(){
+      continue;
+    }*/
+    delay(5000);
+    digitalWrite(led, LOW);
+    newShape = false;
+    sendEnableCmd();
+  }
+}
+void sendSuspendCmd(){
+  Serial.println("<S1>");
+}
+void sendEnableCmd(){
+  Serial.println("<S0>");
+}
+void receiveShapeData(){
+  static bool receiving = false;
+  static byte index = 0;
+  char receivedFromPC;
+
+  while (Serial.available() > 0 && newShape == false){
+    receivedFromPC = Serial.read();
+    if (receiving == true){
+      if(receivedFromPC != '>'){
+        receivedShape[index] = receivedFromPC;
+        index++;
+        if(index >= numChars){
+          index = numChars - 1;
+        }
+      }
+      else { 
+        receivedShape[index] = '\0';
+        receiving = false;
+        index = 0;
+        newShape = true;
+      }
+    }
+    else if (receivedFromPC == '<'){
+      receiving = true;
+    }
+  }
+  strcpy(tempShapeStorage, receivedShape);
+}
+void parseData(){
+  char *shapeToken;
+
+  shapeToken = strtok(tempShapeStorage, ",");
+  strcpy(shape, shapeToken);
+
+  shapeToken = strtok(NULL, ",");
+  xDist = atof(shapeToken);
+
+  shapeToken = strtok(NULL, ",");
+  yDist = atof(shapeToken);
+}
+void sendData(){
+  Serial.print("<PSh: ");
+  Serial.print(shape);
+  Serial.print("; ");
+  Serial.print("Ce: ");
+  Serial.print(xDist);
+  Serial.print(", ");
+  Serial.print(yDist);
+  Serial.print("; ");
+  Serial.print("An: ");
+  Serial.print(baseAngle);
+  Serial.print("; ");
+  Serial.print("Di: ");
+  Serial.print(shapeDist);
+  Serial.print("; ");
+  Serial.print("St: ");
+  Serial.print(fullStretch);
+  Serial.print("; ");
+  Serial.print("Th1: ");
+  Serial.print(th1);
+  Serial.print("; ");
+  Serial.print("Th2: ");
+  Serial.print(th2);
+  Serial.print("; ");
+  Serial.print("To: ");
+  Serial.print(degtoTouch);
+  Serial.println(">");
+}
+void doMath(){
+  baseAngle = radtoDeg(atan(xDist/yDist));
+  shapeDist = hypot(xDist, yDist+1.99);  
+  fullStretch = hypot(L1, shapeDist);
+  th2 = acos((sq(fullStretch)-sq(L2)-sq(L3))/(2.0*L2*L3));
+  th1 = atan((L3*sin(th2))/(L2+L3*cos(th2)));
+  th2 = -(radtoDeg(th2) - 90);
+  th1 = 90 - radtoDeg(th1);
+  degtoTouch = radtoDeg(atan(L1/fullStretch));
+}
+void moveRobot(){
+  //step - rotate baseAngle
+  //servo1 - rotate th1
+  //servo2 - rotate th2
+  //servo1 - rotate degtoTouch
+}
+void enableMagnet(){
+  //magnet - enable
+  //servo1 - rotate -degtoTouch
+}
+void trianglePosition(){
+  baseAngle = -90.0;
+  th1 = 26.75;
+  th2 = -41.27;
+}
+void squarePosition(){
+  baseAngle = 90.0;
+  th1 = 26.75;
+  th2 = -41.27;
+}
+void resetPosition(){
+  baseAngle = 0;
+  th1 = 0;
+  th2 = 0;
+}
+double radtoDeg(double rad){
+  double deg = rad*(180/pi);
+  return deg;
+}
+double degtoRad(double deg){
+  double rad = deg*(pi/180);
+  return rad;  
+}
